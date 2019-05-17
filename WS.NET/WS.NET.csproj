@@ -1,0 +1,26 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>netcoreapp2.1</TargetFramework>
+        <Title>WS.NET</Title>
+        <Authors>DevYukine</Authors>
+        <Description>.NET Core Websocket Library i use throughout my .Net Core applications</Description>
+        <Copyright>2019</Copyright>
+        <PackageProjectUrl>https://github.com/DevYukine/WS.NET</PackageProjectUrl>
+        <PackageLicenseUrl>https://github.com/DevYukine/WS.NET/blob/master/LICENSE</PackageLicenseUrl>
+        <RepositoryUrl>https://github.com/DevYukine/WS.NET</RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
+        <PackageTags>Websocket</PackageTags>
+        <PackageReleaseNotes>Initial Release</PackageReleaseNotes>
+        <PackageRequireLicenseAcceptance>true</PackageRequireLicenseAcceptance>
+    </PropertyGroup>
+
+    <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
+      <DocumentationFile>bin\Debug\WS.NET.xml</DocumentationFile>
+    </PropertyGroup>
+
+    <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
+      <DocumentationFile>bin\Release\WS.NET.xml</DocumentationFile>
+    </PropertyGroup>
+
+</Project>
