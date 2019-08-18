@@ -11,8 +11,12 @@
         <RepositoryUrl>https://github.com/DevYukine/WS.NET</RepositoryUrl>
         <RepositoryType>git</RepositoryType>
         <PackageTags>Websocket</PackageTags>
-        <PackageReleaseNotes>Initial Release</PackageReleaseNotes>
+        <PackageReleaseNotes>Makes Client Threadsafe by queuing Messages up for Sending and Have one Thread Sending them.
+
+Also improve docs and clean up some duplicated code.</PackageReleaseNotes>
         <PackageRequireLicenseAcceptance>true</PackageRequireLicenseAcceptance>
+        <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+        <PackageVersion>1.1.0</PackageVersion>
     </PropertyGroup>
 
     <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
