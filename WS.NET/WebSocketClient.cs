@@ -16,6 +16,8 @@ namespace WS.NET
 	/// </summary>
 	public class WebSocketClient : IDisposable
 	{
+		private const int _receiveChunkSize = 32 * 1024;
+
 		/// <summary>
 		/// Event emitted when the WebSocket Connection Closes.
 		/// </summary>
@@ -188,69 +190,68 @@ namespace WS.NET
 		/// </summary>
 		private async void _read()
 		{
-			while (ClientWebSocket.State == WebSocketState.Open)
+			try
 			{
-				var message = "";
-				var binary = new List<byte>();
-				
-				READ:
-				if (Exit) return;
-				
-				var buffer = new byte[32 * 1024];
-				WebSocketReceiveResult res;
-				try
+				while (ClientWebSocket.State == WebSocketState.Open && !Exit)
 				{
-					res = await ClientWebSocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken);
-				}
-				catch (Exception e)
-				{
-					Error?.Invoke(this, e);
-					break;
-				}
-				
-				if (res == null)
-					goto READ;
-				
-				// ReSharper disable once SwitchStatementMissingSomeCases
-				switch (res.MessageType)
-				{
-					case WebSocketMessageType.Close:
-						if (ClientWebSocket.CloseStatus != null)
-							Close?.Invoke(this,
-								new WebSocketCloseEventArgs((int) ClientWebSocket.CloseStatus, ClientWebSocket.CloseStatusDescription, true));
-						return;
-					case WebSocketMessageType.Text:
+					var buffer = new byte[_receiveChunkSize];
+					var message = "";
+					var binary = new List<byte>();
+					
+					WebSocketReceiveResult result;
+					do
 					{
-						if (!res.EndOfMessage)
-						{
-							message += Encoding.UTF8.GetString(buffer).TrimEnd('\0');
-							goto READ;
-						}
-						message += Encoding.UTF8.GetString(buffer).TrimEnd('\0');
-						
-						Message?.Invoke(this, message);
-						break;
-					}
-					case WebSocketMessageType.Binary:
-						var exactDataBuffer = new byte[res.Count];
-						Array.Copy(buffer, 0, exactDataBuffer, 0, res.Count);
-						if (!res.EndOfMessage)
-						{
-							binary.AddRange(exactDataBuffer);
-							goto READ;
-						}
 
-						binary.AddRange(exactDataBuffer);
-						var binaryData = binary.ToArray();
-						Data?.Invoke(this, binaryData);
-						break;
+						do
+						{
+							result = await ClientWebSocket.ReceiveAsync(new ArraySegment<byte>(buffer),
+								CancellationToken);
+						} while (result == null);
+
+						switch (result.MessageType)
+						{
+							case WebSocketMessageType.Close:
+								if (ClientWebSocket.CloseStatus != null)
+									Close?.Invoke(this,
+										new WebSocketCloseEventArgs((int) ClientWebSocket.CloseStatus, ClientWebSocket.CloseStatusDescription, true));
+								return;
+							case WebSocketMessageType.Text:
+								message += Encoding.UTF8.GetString(buffer).TrimEnd('\0');
+								break;
+							case WebSocketMessageType.Binary:
+								var exactDataBuffer = new byte[result.Count];
+								Array.Copy(buffer, 0, exactDataBuffer, 0, result.Count);
+								binary.AddRange(exactDataBuffer);
+								break;
+							default:
+								throw new ArgumentOutOfRangeException();
+						}
+					} while (!result.EndOfMessage);
+
+					switch (result.MessageType)
+					{
+						case WebSocketMessageType.Binary:
+							Data?.Invoke(this, binary.ToArray());
+							break;
+						case WebSocketMessageType.Close:
+							break;
+						case WebSocketMessageType.Text:
+							Message?.Invoke(this, message);
+							break;
+						default:
+							throw new ArgumentOutOfRangeException();
+					}
+					
 				}
 			}
-
-			if (ClientWebSocket.State == WebSocketState.Closed || ClientWebSocket.State == WebSocketState.CloseReceived || Exit) return;
-			if (ClientWebSocket.CloseStatus != null)
-				Close?.Invoke(this,
-					new WebSocketCloseEventArgs((int) ClientWebSocket.CloseStatus.Value, ClientWebSocket.CloseStatusDescription, true));
+			catch (Exception e)
+			{
+				Error?.Invoke(this, e);
+			}
+			finally
+			{
+				Dispose();
+			}
 		}
 
 		/// <summary>
