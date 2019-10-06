@@ -1,12 +1,12 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Linq;
+using System.IO;
 using System.Net.WebSockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Threading.Tasks.Dataflow;
 
 namespace WS.NET
 {
@@ -16,7 +16,7 @@ namespace WS.NET
 	/// </summary>
 	public class WebSocketClient : IDisposable
 	{
-		private const int _receiveChunkSize = 32 * 1024;
+		private const int _chunkSize = 12 * 1024;
 
 		/// <summary>
 		/// Event emitted when the WebSocket Connection Closes.
@@ -67,17 +67,7 @@ namespace WS.NET
 		/// <summary>
 		/// The Read Thread of this WebSocketClient
 		/// </summary>
-		private Thread ReadThread { get; set; }
-
-		/// <summary>
-		/// The Send Thread of this WebSocketClient
-		/// </summary>
-		private Thread SendThread { get; set; }
-		
-		/// <summary>
-		/// Queue holding Messages to Send
-		/// </summary>
-		private ConcurrentQueue<Sendable> Messages { get; } = new ConcurrentQueue<Sendable>();
+		private Thread ReadThread { get; }
 		
 		/// <summary>
 		/// The URI this WebSocketClient should connect.
@@ -90,6 +80,11 @@ namespace WS.NET
 		private bool Disposed { get; set; }
 		
 		/// <summary>
+		/// ActionBlock for Sending Messages
+		/// </summary>
+		private ActionBlock<WebSocketMessage> SendAction { get; }
+
+		/// <summary>
 		/// Creates a new instance of WebSocketClient.
 		/// </summary>
 		/// <param name="url">The URL this WebSocketClient should connect to.</param>
@@ -97,7 +92,8 @@ namespace WS.NET
 		public WebSocketClient(string url, IWebSocketOptions options = null)
 		{
 			Uri = new Uri(url);
-			SetupThreads();
+			SendAction = new ActionBlock<WebSocketMessage>(_send);
+			ReadThread = new Thread(_read);
 
 			if (options == null) return;
 			if (options.Headers != null) foreach (var (item1, item2) in options.Headers) ClientWebSocket.Options.SetRequestHeader(item1, item2);
@@ -112,7 +108,8 @@ namespace WS.NET
 		public WebSocketClient(Uri uri, IWebSocketOptions options = null)
 		{
 			Uri = uri;
-			SetupThreads();
+			SendAction = new ActionBlock<WebSocketMessage>(_send);
+			ReadThread = new Thread(_read);
 			
 			if (options == null) return;
 			if (options.Headers != null) foreach (var (item1, item2) in options.Headers) ClientWebSocket.Options.SetRequestHeader(item1, item2);
@@ -130,7 +127,7 @@ namespace WS.NET
 			await ClientWebSocket.ConnectAsync(Uri, CancellationToken);
 			Exit = false;
 			Open?.Invoke(this, EventArgs.Empty);
-			StartThreads();
+			ReadThread.Start();
 		}
 
 		/// <summary>
@@ -144,12 +141,9 @@ namespace WS.NET
 		public Task SendAsync(byte[] data, WebSocketMessageType type = WebSocketMessageType.Text)
 		{
 			if (Status == WebSocketState.Closed) throw new InvalidOperationException("Cannot Send a Message on a Closed Connection");
-			var tcs = new TaskCompletionSource<bool>();
-			var sendable = new Sendable(data, type);
-			sendable.Success += (sender, args) => tcs.SetResult(true);
-			sendable.Error += (sender, error) => tcs.SetException(error);
-			Messages.Enqueue(sendable);
-			return tcs.Task;
+			var message = new WebSocketMessage(data, type);
+			SendAction.Post(message);
+			return message.Task;
 		}
 
 		/// <summary>
@@ -194,54 +188,38 @@ namespace WS.NET
 			{
 				while (ClientWebSocket.State == WebSocketState.Open && !Exit)
 				{
-					var buffer = new byte[_receiveChunkSize];
-					var message = "";
-					var binary = new List<byte>();
+					var buffer = new ArraySegment<byte>(new byte[_chunkSize]);
 					
-					WebSocketReceiveResult result;
-					do
+					using (var ms = new MemoryStream())
 					{
-
+						WebSocketReceiveResult result;
 						do
 						{
-							result = await ClientWebSocket.ReceiveAsync(new ArraySegment<byte>(buffer),
-								CancellationToken);
-						} while (result == null);
+							result = await ClientWebSocket.ReceiveAsync(buffer, CancellationToken);
+							
+							ms.Write(buffer.Array ?? throw new Exception(), buffer.Offset, result.Count);
+						} while (!result.EndOfMessage);
+						
+						ms.Seek(0, SeekOrigin.Begin);
 
 						switch (result.MessageType)
 						{
+							case WebSocketMessageType.Binary:
+								Data?.Invoke(this, ms.GetBuffer());
+								break;
 							case WebSocketMessageType.Close:
 								if (ClientWebSocket.CloseStatus != null)
 									Close?.Invoke(this,
 										new WebSocketCloseEventArgs((int) ClientWebSocket.CloseStatus, ClientWebSocket.CloseStatusDescription, true));
 								return;
 							case WebSocketMessageType.Text:
-								message += Encoding.UTF8.GetString(buffer).TrimEnd('\0');
-								break;
-							case WebSocketMessageType.Binary:
-								var exactDataBuffer = new byte[result.Count];
-								Array.Copy(buffer, 0, exactDataBuffer, 0, result.Count);
-								binary.AddRange(exactDataBuffer);
+								using (var reader = new StreamReader(ms, Encoding.UTF8))
+									Message?.Invoke(this, reader.ReadToEnd());
 								break;
 							default:
 								throw new ArgumentOutOfRangeException();
-						}
-					} while (!result.EndOfMessage);
-
-					switch (result.MessageType)
-					{
-						case WebSocketMessageType.Binary:
-							Data?.Invoke(this, binary.ToArray());
-							break;
-						case WebSocketMessageType.Close:
-							break;
-						case WebSocketMessageType.Text:
-							Message?.Invoke(this, message);
-							break;
-						default:
-							throw new ArgumentOutOfRangeException();
+						}	
 					}
-					
 				}
 			}
 			catch (Exception e)
@@ -253,50 +231,18 @@ namespace WS.NET
 				Dispose();
 			}
 		}
-
-		/// <summary>
-		/// Continuously sending if Messages are queued up.
-		/// </summary>
-		private async void _send()
+		
+		private async Task _send(WebSocketMessage data)
 		{
-			while (ClientWebSocket.State != WebSocketState.Closed && !Exit)
+			try
 			{
-				while (Messages.TryDequeue(out var res))
-				{
-					try
-					{
-						await ClientWebSocket.SendAsync(res.Data, res.Type, true, CancellationToken);
-						res.Emit();
-					}
-					catch (Exception e)
-					{
-						res.Emit(e);
-					}
-				}
+				await ClientWebSocket.SendAsync(data.Data, data.Type, true, CancellationToken);
+				data.Complete();
 			}
-
-			foreach (var message in Messages) 
-				message.Emit(new ExternalException("Websocket Connection closed"));
-
-			Messages.Clear();
-		}
-
-		/// <summary>
-		/// Creates the Read and Write Threads for this WebsocketClient
-		/// </summary>
-		private void SetupThreads()
-		{
-			ReadThread = new Thread(_read);
-			SendThread = new Thread(_send);
-		}
-
-		/// <summary>
-		/// Starts the Read and Write Threads for this WebsocketClient
-		/// </summary>
-		private void StartThreads()
-		{
-			ReadThread.Start();
-			SendThread.Start();
+			catch (Exception e)
+			{
+				data.Complete(e);
+			}
 		}
 	}
 }
